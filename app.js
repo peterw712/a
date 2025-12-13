@@ -1,8 +1,14 @@
 let affirmations = [];
 let deck = [];
 let current = "";
+
 let autoSpeak = true;          // ✅ default ON
-let pendingAutoplay = false;   // if browser blocks speech until user gesture
+let pendingAutoplay = false;   // browser may require a user gesture before TTS starts
+
+let nextTimer = null;
+let speakToken = 0;            // increments to invalidate old speech callbacks
+
+const AUTO_GAP_MS = 700;       // pause between affirmations
 
 const elText = document.getElementById("text");
 const newBtn = document.getElementById("newBtn");
@@ -32,10 +38,26 @@ function syncAutoButton() {
   autoBtn.setAttribute("aria-pressed", String(autoSpeak));
 }
 
-function stopSpeaking() {
-  if ("speechSynthesis" in window) {
-    window.speechSynthesis.cancel();
+function clearNextTimer() {
+  if (nextTimer) {
+    clearTimeout(nextTimer);
+    nextTimer = null;
   }
+}
+
+function stopSpeaking() {
+  speakToken++;      // invalidate any pending onend/onstart from previous utterances
+  clearNextTimer();
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+}
+
+function scheduleNext(myToken) {
+  clearNextTimer();
+  nextTimer = setTimeout(() => {
+    if (myToken !== speakToken) return; // stale
+    if (!autoSpeak) return;
+    nextAffirmation(); // will also speak (or defer until unlock)
+  }, AUTO_GAP_MS);
 }
 
 function speak(text, { detectBlocked = false } = {}) {
@@ -44,41 +66,47 @@ function speak(text, { detectBlocked = false } = {}) {
     return;
   }
 
-  stopSpeaking();
+  // New speak attempt invalidates previous chains
+  const myToken = ++speakToken;
+  clearNextTimer();
+  window.speechSynthesis.cancel();
 
   const u = new SpeechSynthesisUtterance(text);
   u.rate = 1;
   u.pitch = 1;
   u.volume = 1;
 
-  if (!detectBlocked) {
-    window.speechSynthesis.speak(u);
-    return;
-  }
-
-  // Try to detect autoplay-blocking: if "onstart" doesn't fire soon, assume blocked
   let started = false;
   u.onstart = () => {
     started = true;
     pendingAutoplay = false;
   };
 
+  u.onend = () => {
+    if (myToken !== speakToken) return;
+    if (autoSpeak) scheduleNext(myToken);
+  };
+
+  u.onerror = () => {
+    if (myToken !== speakToken) return;
+    if (autoSpeak) scheduleNext(myToken);
+  };
+
   window.speechSynthesis.speak(u);
 
-  setTimeout(() => {
-    // If it didn't start, likely needs a user gesture
-    if (!started && autoSpeak) {
-      pendingAutoplay = true;
-      // Optional: console hint
-      console.warn("TTS blocked until user interaction. Will autoplay on first click/tap/key.");
-    }
-  }, 600);
+  // Try to detect if autoplay is blocked until user interaction
+  if (detectBlocked) {
+    setTimeout(() => {
+      if (myToken !== speakToken) return;
+      if (!started && autoSpeak) pendingAutoplay = true;
+    }, 600);
+  }
 }
 
 function ensureAutoplayUnlockHandlers() {
   const unlock = () => {
     if (autoSpeak && pendingAutoplay && current) {
-      // once user interacts, we can speak
+      // Start the chain once the browser considers we had a "gesture"
       speak(current);
       pendingAutoplay = false;
     }
@@ -87,7 +115,6 @@ function ensureAutoplayUnlockHandlers() {
     window.removeEventListener("touchstart", unlock, true);
   };
 
-  // install once (capture=true so we catch early)
   window.addEventListener("pointerdown", unlock, true);
   window.addEventListener("keydown", unlock, true);
   window.addEventListener("touchstart", unlock, true);
@@ -103,6 +130,7 @@ function nextAffirmation() {
   if (!affirmations.length) return;
   if (!deck.length) refillDeck();
 
+  // Avoid immediate repeat when we reshuffle/refill
   let next = deck.pop();
   if (next === current && affirmations.length > 1) {
     if (!deck.length) refillDeck();
@@ -130,7 +158,7 @@ async function loadAffirmations() {
 
     affirmations = list.filter((s) => typeof s === "string" && s.trim().length);
     refillDeck();
-    nextAffirmation(); // will try autoplay (or defer until first user gesture if blocked)
+    nextAffirmation(); // starts autoplay chain (or defers until first interaction)
   } catch (err) {
     elText.textContent = `Couldn't load affirmations.json (${err.message})`;
     console.error(err);
@@ -138,19 +166,27 @@ async function loadAffirmations() {
 }
 
 // Buttons
-newBtn.addEventListener("click", nextAffirmation);
+newBtn.addEventListener("click", () => {
+  stopSpeaking();
+  nextAffirmation();
+});
+
 speakBtn.addEventListener("click", () => current && speak(current));
-stopBtn.addEventListener("click", stopSpeaking);
+
+stopBtn.addEventListener("click", () => {
+  pendingAutoplay = false;
+  stopSpeaking();
+});
 
 autoBtn.addEventListener("click", () => {
   autoSpeak = !autoSpeak;
   syncAutoButton();
 
   if (autoSpeak) {
-    attemptAutoplay(); // speak immediately if possible; otherwise on next user gesture
+    attemptAutoplay(); // (re)start chain
   } else {
     pendingAutoplay = false;
-    stopSpeaking();
+    stopSpeaking();    // stop chain + speech
   }
 });
 
@@ -160,8 +196,10 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     if (current) speak(current);
   } else if (e.key === "n" || e.key === "N") {
+    stopSpeaking();
     nextAffirmation();
   } else if (e.key === "Escape") {
+    pendingAutoplay = false;
     stopSpeaking();
   }
 });
