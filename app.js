@@ -64,22 +64,33 @@ function nextAffirmation() {
 
 async function loadAffirmations() {
   try {
-    const res = await fetch("./affirmations.json", { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // Ensure the base URL behaves like a directory (fixes missing trailing slash issues)
+    const base = location.href.endsWith("/") ? location.href : location.href + "/";
+    const url = new URL("affirmations.json", base);
+
+    const res = await fetch(url.toString(), { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url.pathname}`);
+
     const data = await res.json();
 
-    if (!data || !Array.isArray(data.affirmations) || data.affirmations.length < 1) {
-      throw new Error("Bad JSON format. Expected { affirmations: [ ... ] }");
+    // Accept either:
+    // 1) { "affirmations": [...] }
+    // 2) [ ... ]
+    const list = Array.isArray(data) ? data : data?.affirmations;
+
+    if (!Array.isArray(list) || list.length < 1) {
+      throw new Error("Invalid JSON. Use { \"affirmations\": [ ... ] } or just [ ... ]");
     }
 
-    affirmations = data.affirmations.filter((s) => typeof s === "string" && s.trim().length);
+    affirmations = list.filter((s) => typeof s === "string" && s.trim().length);
     refillDeck();
     nextAffirmation();
   } catch (err) {
-    elText.textContent = "Couldn't load affirmations.json. Run this via a local server.";
+    elText.textContent = `Couldn't load affirmations.json (${err.message})`;
     console.error(err);
   }
 }
+
 
 // Buttons
 newBtn.addEventListener("click", nextAffirmation);
@@ -103,5 +114,4 @@ window.addEventListener("keydown", (e) => {
     stopSpeaking();
   }
 });
-
 loadAffirmations();
