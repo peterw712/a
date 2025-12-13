@@ -1,7 +1,7 @@
 let affirmations = [];
 let deck = [];
 let current = "";
-let autoSpeak = false;
+let autoSpeak = true; // ✅ autoplay default ON
 
 const elText = document.getElementById("text");
 const newBtn = document.getElementById("newBtn");
@@ -47,6 +47,11 @@ function speak(text) {
   window.speechSynthesis.speak(u);
 }
 
+function syncAutoButton() {
+  autoBtn.textContent = `Auto: ${autoSpeak ? "On" : "Off"}`;
+  autoBtn.setAttribute("aria-pressed", String(autoSpeak));
+}
+
 function nextAffirmation() {
   if (!affirmations.length) return;
   if (!deck.length) refillDeck();
@@ -79,18 +84,17 @@ async function loadAffirmations() {
     const list = Array.isArray(data) ? data : data?.affirmations;
 
     if (!Array.isArray(list) || list.length < 1) {
-      throw new Error("Invalid JSON. Use { \"affirmations\": [ ... ] } or just [ ... ]");
+      throw new Error('Invalid JSON. Use { "affirmations": [ ... ] } or just [ ... ]');
     }
 
     affirmations = list.filter((s) => typeof s === "string" && s.trim().length);
     refillDeck();
-    nextAffirmation();
+    nextAffirmation(); // will auto-speak because autoSpeak=true
   } catch (err) {
     elText.textContent = `Couldn't load affirmations.json (${err.message})`;
     console.error(err);
   }
 }
-
 
 // Buttons
 newBtn.addEventListener("click", nextAffirmation);
@@ -99,8 +103,10 @@ stopBtn.addEventListener("click", stopSpeaking);
 
 autoBtn.addEventListener("click", () => {
   autoSpeak = !autoSpeak;
-  autoBtn.textContent = `Auto: ${autoSpeak ? "On" : "Off"}`;
-  autoBtn.setAttribute("aria-pressed", String(autoSpeak));
+  syncAutoButton();
+
+  // If turning Auto ON, speak whatever is currently displayed
+  if (autoSpeak && current) speak(current);
 });
 
 // Keyboard shortcuts
@@ -114,4 +120,7 @@ window.addEventListener("keydown", (e) => {
     stopSpeaking();
   }
 });
+
+// ✅ ensure button state matches default on first paint
+syncAutoButton();
 loadAffirmations();
