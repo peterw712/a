@@ -1,7 +1,8 @@
 let affirmations = [];
 let deck = [];
 let current = "";
-let autoSpeak = true; // ✅ autoplay default ON
+let autoSpeak = true;          // ✅ default ON
+let pendingAutoplay = false;   // if browser blocks speech until user gesture
 
 const elText = document.getElementById("text");
 const newBtn = document.getElementById("newBtn");
@@ -26,17 +27,23 @@ function setText(t) {
   elText.textContent = t;
 }
 
+function syncAutoButton() {
+  autoBtn.textContent = `Auto: ${autoSpeak ? "On" : "Off"}`;
+  autoBtn.setAttribute("aria-pressed", String(autoSpeak));
+}
+
 function stopSpeaking() {
   if ("speechSynthesis" in window) {
     window.speechSynthesis.cancel();
   }
 }
 
-function speak(text) {
+function speak(text, { detectBlocked = false } = {}) {
   if (!("speechSynthesis" in window)) {
     elText.textContent = "Sorry—your browser doesn't support Text-to-Speech.";
     return;
   }
+
   stopSpeaking();
 
   const u = new SpeechSynthesisUtterance(text);
@@ -44,19 +51,58 @@ function speak(text) {
   u.pitch = 1;
   u.volume = 1;
 
+  if (!detectBlocked) {
+    window.speechSynthesis.speak(u);
+    return;
+  }
+
+  // Try to detect autoplay-blocking: if "onstart" doesn't fire soon, assume blocked
+  let started = false;
+  u.onstart = () => {
+    started = true;
+    pendingAutoplay = false;
+  };
+
   window.speechSynthesis.speak(u);
+
+  setTimeout(() => {
+    // If it didn't start, likely needs a user gesture
+    if (!started && autoSpeak) {
+      pendingAutoplay = true;
+      // Optional: console hint
+      console.warn("TTS blocked until user interaction. Will autoplay on first click/tap/key.");
+    }
+  }, 600);
 }
 
-function syncAutoButton() {
-  autoBtn.textContent = `Auto: ${autoSpeak ? "On" : "Off"}`;
-  autoBtn.setAttribute("aria-pressed", String(autoSpeak));
+function ensureAutoplayUnlockHandlers() {
+  const unlock = () => {
+    if (autoSpeak && pendingAutoplay && current) {
+      // once user interacts, we can speak
+      speak(current);
+      pendingAutoplay = false;
+    }
+    window.removeEventListener("pointerdown", unlock, true);
+    window.removeEventListener("keydown", unlock, true);
+    window.removeEventListener("touchstart", unlock, true);
+  };
+
+  // install once (capture=true so we catch early)
+  window.addEventListener("pointerdown", unlock, true);
+  window.addEventListener("keydown", unlock, true);
+  window.addEventListener("touchstart", unlock, true);
+}
+
+function attemptAutoplay() {
+  if (!autoSpeak || !current) return;
+  speak(current, { detectBlocked: true });
+  ensureAutoplayUnlockHandlers();
 }
 
 function nextAffirmation() {
   if (!affirmations.length) return;
   if (!deck.length) refillDeck();
 
-  // Avoid immediate repeat when we reshuffle/refill
   let next = deck.pop();
   if (next === current && affirmations.length > 1) {
     if (!deck.length) refillDeck();
@@ -64,12 +110,11 @@ function nextAffirmation() {
   }
 
   setText(next);
-  if (autoSpeak) speak(next);
+  attemptAutoplay();
 }
 
 async function loadAffirmations() {
   try {
-    // Ensure the base URL behaves like a directory (fixes missing trailing slash issues)
     const base = location.href.endsWith("/") ? location.href : location.href + "/";
     const url = new URL("affirmations.json", base);
 
@@ -77,10 +122,6 @@ async function loadAffirmations() {
     if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url.pathname}`);
 
     const data = await res.json();
-
-    // Accept either:
-    // 1) { "affirmations": [...] }
-    // 2) [ ... ]
     const list = Array.isArray(data) ? data : data?.affirmations;
 
     if (!Array.isArray(list) || list.length < 1) {
@@ -89,7 +130,7 @@ async function loadAffirmations() {
 
     affirmations = list.filter((s) => typeof s === "string" && s.trim().length);
     refillDeck();
-    nextAffirmation(); // will auto-speak because autoSpeak=true
+    nextAffirmation(); // will try autoplay (or defer until first user gesture if blocked)
   } catch (err) {
     elText.textContent = `Couldn't load affirmations.json (${err.message})`;
     console.error(err);
@@ -105,8 +146,12 @@ autoBtn.addEventListener("click", () => {
   autoSpeak = !autoSpeak;
   syncAutoButton();
 
-  // If turning Auto ON, speak whatever is currently displayed
-  if (autoSpeak && current) speak(current);
+  if (autoSpeak) {
+    attemptAutoplay(); // speak immediately if possible; otherwise on next user gesture
+  } else {
+    pendingAutoplay = false;
+    stopSpeaking();
+  }
 });
 
 // Keyboard shortcuts
@@ -121,6 +166,5 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-// ✅ ensure button state matches default on first paint
 syncAutoButton();
 loadAffirmations();
