@@ -1,18 +1,18 @@
-// Reads random affirmations from affirmations.json and speaks them continuously.
-
 const DISPLAY = document.getElementById("affirmation");
 const playBtn = document.getElementById("playBtn");
 const pauseBtn = document.getElementById("pauseBtn");
 
-const FIRST_START_DELAY_MS = 600; // slight delay before first one
-const BETWEEN_DELAY_MS = 700;     // slight delay between each
+const FIRST_START_DELAY_MS = 600;
+const BETWEEN_DELAY_MS = 700;
 
 let affirmations = [];
 let timerId = null;
-let currentUtterance = null;
 
-let running = false; // "loop is active"
-let paused = false;  // user paused
+let running = false;
+let paused = false;
+
+// Used to ignore stale onend/onerror from older utterances
+let utteranceSeq = 0;
 
 function clearTimer() {
   if (timerId !== null) {
@@ -22,56 +22,108 @@ function clearTimer() {
 }
 
 function normalizeAffirmations(data) {
-  // Supports either:
-  // - ["a", "b", ...]
-  // - { "affirmations": ["a", "b", ...] }
-  if (Array.isArray(data)) return data.filter(Boolean);
-  if (data && Array.isArray(data.affirmations)) return data.affirmations.filter(Boolean);
+  if (Array.isArray(data)) return data.map(String).map(s => s.trim()).filter(Boolean);
+  if (data && Array.isArray(data.affirmations)) {
+    return data.affirmations.map(String).map(s => s.trim()).filter(Boolean);
+  }
   return [];
 }
 
 function pickRandom() {
-  const i = Math.floor(Math.random() * affirmations.length);
-  return affirmations[i];
+  return affirmations[Math.floor(Math.random() * affirmations.length)];
 }
 
-function speakOne(text) {
-  // Cancel any queued speech (but don't nuke resume behavior while paused speaking)
-  // We'll only cancel when starting a fresh utterance.
-  window.speechSynthesis.cancel();
+function waitForVoices(timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    const synth = window.speechSynthesis;
 
-  currentUtterance = new SpeechSynthesisUtterance(text);
+    const done = () => {
+      synth.removeEventListener?.("voiceschanged", onVoicesChanged);
+      resolve();
+    };
 
-  currentUtterance.onend = () => {
-    currentUtterance = null;
+    const onVoicesChanged = () => done();
+
+    // If voices are already available, proceed.
+    if (synth.getVoices && synth.getVoices().length) return done();
+
+    // Otherwise wait briefly for voices to load (some browsers load async).
+    synth.addEventListener?.("voiceschanged", onVoicesChanged);
+    setTimeout(done, timeoutMs);
+  });
+}
+
+async function speakText(text) {
+  const synth = window.speechSynthesis;
+  const mySeq = ++utteranceSeq;
+
+  // If user paused/stopped while we were awaiting, bail out.
+  if (!running || paused) return;
+
+  await waitForVoices();
+
+  if (!running || paused || mySeq !== utteranceSeq) return;
+
+  // If something is unexpectedly queued/speaking, clear it once, then proceed.
+  // (We do NOT cancel on every cycle — that’s what causes rapid “flipping” on some browsers.)
+  if (synth.speaking || synth.pending) {
+    synth.cancel();
+    await new Promise((r) => setTimeout(r, 50));
+    if (!running || paused || mySeq !== utteranceSeq) return;
+  }
+
+  const u = new SpeechSynthesisUtterance(text);
+
+  let started = false;
+
+  u.onstart = () => {
+    if (mySeq !== utteranceSeq) return;
+    started = true;
+  };
+
+  u.onend = () => {
+    if (mySeq !== utteranceSeq) return;
+
+    // Only advance if the utterance actually started (prevents instant end/cancel loops)
+    if (!started) {
+      running = false;
+      paused = true;
+      return;
+    }
+
     if (!running || paused) return;
 
     clearTimer();
     timerId = setTimeout(() => {
-      if (!running || paused) return;
-      speakNext();
+      if (running && !paused) speakNext();
     }, BETWEEN_DELAY_MS);
   };
 
-  currentUtterance.onerror = () => {
-    currentUtterance = null;
-    if (!running || paused) return;
+  u.onerror = () => {
+    if (mySeq !== utteranceSeq) return;
 
-    clearTimer();
-    timerId = setTimeout(() => {
-      if (!running || paused) return;
-      speakNext();
-    }, BETWEEN_DELAY_MS);
+    // If speech errors immediately (often autoplay blocked), stop looping until user hits Play.
+    running = false;
+    paused = true;
   };
 
-  window.speechSynthesis.speak(currentUtterance);
+  synth.speak(u);
+
+  // If it never starts soon, treat it like “blocked” and stop the loop.
+  setTimeout(() => {
+    if (mySeq !== utteranceSeq) return;
+    if (running && !paused && !started && !synth.speaking) {
+      running = false;
+      paused = true;
+    }
+  }, 1500);
 }
 
 function speakNext() {
   if (!affirmations.length) return;
   const text = pickRandom();
   DISPLAY.textContent = text;
-  speakOne(text);
+  speakText(text);
 }
 
 function startLoop() {
@@ -82,45 +134,42 @@ function startLoop() {
 
   clearTimer();
   timerId = setTimeout(() => {
-    if (!running || paused) return;
-    speakNext();
+    if (running && !paused) speakNext();
   }, FIRST_START_DELAY_MS);
 }
 
 function pauseLoop() {
   paused = true;
-  running = true; // still "active", just paused
   clearTimer();
 
-  // Pause if currently speaking
-  if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
-    window.speechSynthesis.pause();
-  }
+  const synth = window.speechSynthesis;
+  if (synth.speaking && !synth.paused) synth.pause();
 }
 
 function playLoop() {
-  // If speech is paused mid-utterance, resume it.
-  if (window.speechSynthesis.paused) {
+  const synth = window.speechSynthesis;
+
+  // If currently paused mid-utterance, resume.
+  if (synth.paused) {
     paused = false;
     running = true;
-    window.speechSynthesis.resume();
+    synth.resume();
     return;
   }
 
-  // If we're waiting between affirmations, restart the next one.
   paused = false;
 
+  // If loop was stopped (e.g., autoplay blocked), start again (user gesture helps).
   if (!running) {
     startLoop();
     return;
   }
 
-  // If nothing is speaking (paused during delay or ended), continue.
-  if (!window.speechSynthesis.speaking) {
+  // If we were paused during the between-delay, continue.
+  if (!synth.speaking && !synth.pending) {
     clearTimer();
     timerId = setTimeout(() => {
-      if (!running || paused) return;
-      speakNext();
+      if (running && !paused) speakNext();
     }, 200);
   }
 }
@@ -128,6 +177,7 @@ function playLoop() {
 async function init() {
   const res = await fetch("./affirmations.json", { cache: "no-store" });
   const data = await res.json();
+
   affirmations = normalizeAffirmations(data);
 
   if (!affirmations.length) {
@@ -135,7 +185,7 @@ async function init() {
     return;
   }
 
-  // Autoplay (may be blocked in some browsers until the first user gesture)
+  // Attempt autoplay. If the browser blocks it, it will stop and user can hit Play once.
   startLoop();
 }
 
